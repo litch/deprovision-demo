@@ -168,15 +168,28 @@ async fn process_deprovision_command(js: &JetStream, command: RequestDeprovision
     Ok(())
 }
 
+struct Deprovisioning {
+    id: String,
+    organization_id: String,
+    requested_at: chrono::DateTime<chrono::Utc>,
+    deprovisioned_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+
 async fn handle_deprovision_requested(js: &JetStream, event: DeprovisionRequestedEvent) -> Result<(), Box<dyn Error>> {
     println!("Handling deprovision requested event: {:?}", event);
     let id = event.deprovisioning_id.clone();
     // Simulate some work
 
     let projection = project_deprovisioning(js, id).await?;
-    if projection {
+
+    if projection.deprovisioned_at.is_some() {
         return Ok(());
     }
+
+    // Let's say it's a multistep deletion:
+    // kubernetes.deleteThing().await?;
+    // kubernetes.deleteSecondThing().await?;
 
     let response_event = DeprovisionedEvent {
         organization_id: event.organization_id,
@@ -196,33 +209,36 @@ async fn handle_deprovision_requested(js: &JetStream, event: DeprovisionRequeste
 }
 
 
-async fn project_deprovisioning(js: &JetStream, id: String) -> Result<bool, Box<dyn Error>> {
+async fn project_deprovisioning(js: &JetStream, id: String) -> Result<Deprovisioning, Box<dyn Error>> {
     println!("Projecting deprovisioning: {:?}", id);
 
     let subject_pattern = format!("deprovisioning.events.{:?}", id).to_string();
     let events = fetch_deprovisioning_events(js, subject_pattern).await?;
 
-    let mut deprovisioned = false;
+
+    let mut deprovisioning = Deprovisioning {
+        id: id.clone(),
+        organization_id: "".to_string(),
+        requested_at: chrono::Utc::now(),
+        deprovisioned_at: None,
+    };
 
     for event in events {
         match event {
-            Event::DeprovisionRequested(_) => {
-                // No-op, we're waiting for the deprovisioned event.
+            Event::DeprovisionRequested(e) => {
+                deprovisioning.organization_id = e.organization_id;
+                deprovisioning.requested_at = chrono::DateTime::parse_from_rfc3339(&e.requested_at)?.with_timezone(&chrono::Utc);
+
             },
-            Event::Deprovisioned(_) => {
-                deprovisioned = true;
+            Event::Deprovisioned(e) => {
+                deprovisioning.deprovisioned_at = Some(chrono::DateTime::parse_from_rfc3339(&e.deprovisioned_at)?.with_timezone(&chrono::Utc));
                 break;
             }
         }
     }
 
-    if deprovisioned {
-        println!("Deprovisioning complete for: {:?}", id);
-    } else {
-        println!("Deprovisioning not yet complete for: {:?}", id);
-    }
 
-    return Ok(deprovisioned)
+    return Ok(deprovisioning)
 }
 
 async fn fetch_deprovisioning_events(js: &JetStream, subject_pattern: String) -> Result<Vec<Event>, Box<dyn Error>> {
